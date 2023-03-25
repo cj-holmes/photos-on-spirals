@@ -1,5 +1,7 @@
 ---
 output: github_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
@@ -191,7 +193,7 @@ ggplot() + geom_sf(data = intersections |> st_union(), col = 1, fill = "red")
 last_plot() + coord_sf(xlim = c(0.4, 0.6), ylim = c(0.4, 0.6))
 ```
 
-# Create a function
+## Create a function
 * Put together a function that runs the code above, with some small additions
   * The ability to invert the image
   * Control the outer spiral radius by a factor `spiral_r1_f` where a value of 1 takes it to the edge of the image
@@ -350,6 +352,8 @@ last_plot() + coord_sf(xlim = c(0.3, 0.7), ylim = c(0.3, 0.7))
 
 ## Beyond spirals
 * Of course this method lends itself to any shapes being used (not just spirals)
+
+### Grids
 * Here's a very quick look at using a grid of squares or hexagons instead using `st_make_grid()`
   * Just using the same values of `thin` and `thick` as before. This should be changed 
 
@@ -376,3 +380,118 @@ intersections <-
 ggplot() + geom_sf(data = intersections, fill = 1, col = NA)
 ```
 
+### Flow field
+* I've modified some code from my [flow field art(?) repo](https://github.com/cj-holmes/flow-field-art) to create a set of LINESTRINGs across a flow field
+* This is just a quick proof of concept
+```{r fig.width=8, fig.height=8, dpi=300}
+set.seed(4)
+
+# Set dimensions for noise generation
+x_side <- 400
+y_side <- 400
+
+# Create a noise field matrix with the {ambient} package
+m <- 
+  ambient::noise_simplex(
+    c(y_side, x_side),
+    frequency = 0.0003,
+    octaves = 1,
+    pertubation = "normal",
+    pertubation_amplitude = 2,
+    fractal = 'billow') |> 
+  scales::rescale(c(-90, 90)) # scale noise values to angles in degrees (-90 to 90)
+
+# Get the coords of flow line across the angle matrix
+ff_polys <- function(
+    x_start, 
+    y_start, 
+    step_length, 
+    n_steps, 
+    angle_matrix){
+  
+  # Initialise vectors with the starting x and y values filled with NAs
+  out_x <- c(x_start, rep(NA, n_steps))
+  out_y <- c(y_start, rep(NA, n_steps))
+  
+  # If the starting point is outside the angle_matrix dimensions, return NULL
+  if(x_start > ncol(angle_matrix) |
+     x_start < 1 |
+     y_start > nrow(angle_matrix) |
+     y_start < 1){
+    return(NULL)
+  }
+  
+  # Loop through each step as we travel across the angle matrix
+  for(i in 1:n_steps){
+  
+    # Get the angle of the nearest flow field point where we are for this iteration
+    a <- angle_matrix[round(out_y[i]), round(out_x[i])]
+    
+    # Compute how far to move in x and y for the given angle and step_length
+    step_x <- cos(a*(pi/180))*step_length
+    step_y <- sin(a*(pi/180))*step_length
+    
+    # Add the distance in x and y to the current location
+    next_x <- out_x[i] + step_x
+    next_y <- out_y[i] + step_y
+    
+    # If the next point in the path sits outside the angle matrix, stop iterating along the path
+    if(next_x > ncol(angle_matrix) |
+       next_x < 1 |
+       next_y > nrow(angle_matrix) |
+       next_y < 1){
+      break
+    }
+    
+    # Append the new x and y location to the output 
+    # (ready to be used as the starting point for the next step iteration)
+    out_x[i+1] <- next_x
+    out_y[i+1] <- next_y
+  }
+  
+  # Return tibble of the x, y, paths
+  tibble(x = out_x, y = out_y) |> filter(!is.na(x), !is.na(y))
+}
+
+# Define number of points for flow lines to start at
+n <- 800
+
+# Re assign thick and thin
+thin <-  0.0001
+thick <- 0.0025
+
+# Compute the flow line LINESTRINGs
+ff <-
+  tibble(
+    x_start = runif(n, 1, ncol(m)),
+    y_start = runif(n, 1, nrow(m)))  |> 
+  mutate(
+    id = row_number(),
+    step_length = 1,
+    n_steps = 400) |> 
+  mutate(
+    paths = pmap(
+      .l = list(x_start = x_start,
+                y_start = y_start,
+                step_length = step_length,
+                n_steps = n_steps),
+      .f = ff_polys,
+      angle_matrix = m)) |> 
+  unnest(cols=paths) |> 
+  st_as_sf(coords = c("x", "y")) |> 
+  group_by(id) |> 
+  summarise() |>
+  mutate(type = st_geometry_type(geometry)) |> 
+  filter(type == "MULTIPOINT") |> 
+  st_cast("LINESTRING") |> 
+  st_union() |>
+  st_normalize()
+
+# Compute intersections and plot
+intersections <-
+  st_intersection(i_sf, ff) |>
+  mutate(n = scales::rescale(col, to=c(thin, thick))) |>
+  mutate(geometry = st_buffer(geometry, n, endCapStyle = "ROUND"))
+
+ggplot() + geom_sf(data = intersections, fill = 1, col = NA)
+```
